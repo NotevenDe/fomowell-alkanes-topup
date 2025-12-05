@@ -3,6 +3,7 @@ use ic_cdk::api::caller;
 use ic_cdk::api::management_canister::http_request::{http_request, CanisterHttpRequestArgument};
 use ic_cdk_macros::{init, post_upgrade, pre_upgrade, query, update};
 use serde_json::Value;
+use ic_cdk::api::time;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use ic_cdk_timers::set_timer_interval;
@@ -33,7 +34,7 @@ pub use psbt::{
     builder::PsbtBuilder,
     transaction::{combine_psbt, create_transaction_multi},
     types::{InputSignatureType, TransactionInput, TransactionOutput, TransactionResult},
-    gas::calculate_fee_simple,
+    gas::{calculate_fee_simple, calculate_fee_with_opreturn},
 };
 use crate::alkanes::alkanes_data::alkanes_protostone::{Protostone, Edict, RuneId, build_alkanes_transfer_script};
 
@@ -44,10 +45,8 @@ use crate::alkanes::alkanes_storage::{
     set_token_id_mapping, get_token_id_by_alkaneid, get_alkane_fund_utxo, get_all_utxos, AlkaneUtxoRecord,get_utxos_by_address
 };
 
-
-
-
 use crate::did::fomowell_token::{CreateMemeTokenArg, MemeTokenType, Service, InternalTransferArg, Account, LedgerType};
+
 
 const IC_BITCOIN_NETWORK: ic_cdk::api::management_canister::bitcoin::BitcoinNetwork =
     ic_cdk::api::management_canister::bitcoin::BitcoinNetwork::Testnet;
@@ -66,32 +65,30 @@ thread_local! {
     static PROCESSED_TRANSACTIONS: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
     static PENDING_TX_ID: RefCell<Option<String>> = RefCell::new(None); //假设一笔
     static WITHDRAW_REQUESTS: RefCell<HashMap<Principal, Vec<WithdrawRequest>>> = RefCell::new(HashMap::new());
+    static LOGS: RefCell<Vec<LogEntry>> = RefCell::new(Vec::new());
 }
 
 #[init]
 async fn init() {
-    // storage_地址
-    let owner: Principal = Principal::from_text("rwlgt-iiaaa-aaaaa-aaaaa-cai").unwrap();
+    let owner: Principal = Principal::from_text("tvz33-ke3fp-pkev4-7zlcz-e6la2-nuoxp-ogkve-udz64-65zrs-rr34c-5qe").unwrap();
     storage_init(owner);
 
-    let in_fomowell_alkanes_topup_address = generate_address(fomowell_alkanes_topup_address.to_string()).await;
-    let in_fomowell_alkans_fund_address = generate_address(fomowell_alkanes_fund_address.to_string()).await;
-    let in_fomowell_btc_address = generate_address(fomowell_btc_address.to_string()).await;
+    // let in_fomowell_alkanes_topup_address = generate_address(fomowell_alkanes_topup_address.to_string()).await;
+    // let in_fomowell_alkans_fund_address = generate_address(fomowell_alkanes_fund_address.to_string()).await;
+    // let in_fomowell_btc_address = generate_address(fomowell_btc_address.to_string()).await;
 
-    ADDRESSES.with(|addrs| {
-        let mut map = addrs.borrow_mut();
-        map.insert("alkanes_topup".to_string(), in_fomowell_alkanes_topup_address);
-        map.insert("alkanes_fund".to_string(), in_fomowell_alkans_fund_address);
-        map.insert("btc".to_string(), in_fomowell_btc_address);
-    });
-    // 定时归集，发送
-    set_timer_interval(Duration::from_secs(3600), || {
-        ic_cdk::spawn(gather_alkanes_utxo_timer());
-    });
-    set_timer_interval(Duration::from_secs(7200), || {
-        ic_cdk::spawn(check_withdraw_request());
-    });
-
+    // ADDRESSES.with(|addrs| {
+    //     let mut map = addrs.borrow_mut();
+    //     map.insert("alkanes_topup".to_string(), in_fomowell_alkanes_topup_address);
+    //     map.insert("alkanes_fund".to_string(), in_fomowell_alkans_fund_address);
+    //     map.insert("btc".to_string(), in_fomowell_btc_address);
+    // });
+    // set_timer_interval(Duration::from_secs(3600), || {
+    //     ic_cdk::spawn(gather_alkanes_utxo_timer());
+    // });
+    // set_timer_interval(Duration::from_secs(7200), || {
+    //     ic_cdk::spawn(check_withdraw_request());
+    // });
 }
 
 
@@ -106,7 +103,6 @@ async fn post_upgrade_hook() {
     let in_fomowell_alkanes_topup_address = generate_address(fomowell_alkanes_topup_address.to_string()).await;
     let in_fomowell_alkanes_fund_address = generate_address(fomowell_alkanes_fund_address.to_string()).await;
     let in_fomowell_btc_address = generate_address(fomowell_btc_address.to_string()).await;
-    // 生成地址
     ADDRESSES.with(|addrs| {
         let mut map = addrs.borrow_mut();
         map.insert("alkanes_topup".to_string(), in_fomowell_alkanes_topup_address);
@@ -120,6 +116,27 @@ pub struct EdictInput {
     pub tx: u32,
     pub amount: u128,
     pub output: u32,
+}
+
+#[derive(CandidType, Deserialize, Clone)]
+pub struct LogEntry {
+    pub timestamp_nanos: u64,
+    pub event: String,
+}
+
+fn append_log(event: impl Into<String>) {
+    const MAX_LOGS: usize = 500;
+    LOGS.with(|logs| {
+        let mut vec = logs.borrow_mut();
+        vec.push(LogEntry {
+            timestamp_nanos: time(),
+            event: event.into(),
+        });
+        if vec.len() > MAX_LOGS {
+            let overflow = vec.len() - MAX_LOGS;
+            vec.drain(0..overflow);
+        }
+    });
 }
 
 pub fn generate_protostone(edicts: Vec<EdictInput>) -> (ScriptBuf) {
@@ -183,17 +200,25 @@ async fn topup_alkanes(txid: String) -> Result<String, String> {
                     match result {
                         crate::did::fomowell_token::Result1::Ok => {
                             PROCESSED_TRANSACTIONS.with(|set| set.borrow_mut().insert(txid.clone()));
+                            append_log(format!("[topup] success txid={} amount={} alkaneid={}", txid, record.amount, record.alkaneid));
                             Ok(format!("Topup successful: {} tokens transferred for txid {}", record.amount, txid))
                         }
                         crate::did::fomowell_token::Result1::Err(e) => {
+                            append_log(format!("[topup] internal_transfer failed txid={} error={}", txid, e));
                             Err(format!("Internal transfer failed: {}", e))
                         }
                     }
                 }
-                Err(e) => Err(format!("Failed to call internal_transfer: {:?}", e)),
+                Err(e) => {
+                    append_log(format!("[topup] call internal_transfer error txid={} err={:?}", txid, e));
+                    Err(format!("Failed to call internal_transfer: {:?}", e))
+                },
             }
         }
-        Err(e) => Err(e),
+        Err(e) => {
+            append_log(format!("[topup] record not found txid={} err={}", txid, e));
+            Err(e)
+        },
     }
 }
 
@@ -221,6 +246,7 @@ async fn withdraw_alkanes(withdraw_request: WithdrawRequest) -> Result<String, S
         requests.borrow().len() >= 10
     });
     if is_full {
+        append_log("[withdraw-queue] queue full");
         return Err("Withdraw request queue is full".to_string());
     }
     
@@ -231,24 +257,34 @@ async fn withdraw_alkanes(withdraw_request: WithdrawRequest) -> Result<String, S
             .or_insert_with(Vec::new)
             .push(withdraw_request.clone());
     });
+    append_log(format!("[withdraw-queue] queued ic_txid={} for caller={}", withdraw_request.ic_txid, pid));
     Ok("Withdraw request submitted".into())
 }
 
 async fn check_withdraw_request()  {
-    let PREVIOUS_TX_ID = PENDING_TX_ID.with(|id| id.borrow().clone()).unwrap();
+    let PREVIOUS_TX_ID = match PENDING_TX_ID.with(|id| id.borrow().clone()) {
+        Some(txid) => txid,
+        None => {
+            return;
+        }
+    };    
+    append_log(format!("[withdraw-check] checking txid={}", PREVIOUS_TX_ID));
     match check_tx_confirmed(PREVIOUS_TX_ID.clone()).await {
         Ok(true) => {
+            append_log(format!("[withdraw-check] confirmed txid={}", PREVIOUS_TX_ID));
             let withdraw_requests = WITHDRAW_REQUESTS.with(|requests| {
                 requests.borrow().clone()
             });   
             if let Err(e) = send_withdraw_request(withdraw_requests.clone()).await {
-                ic_cdk::println!("withdraw_alkanes error: {}", e);
+                append_log(format!("send_withdraw_request error={}", e));
             }
         }
         Ok(false) => {
+            append_log(format!("[withdraw-check] not confirmed txid={}", PREVIOUS_TX_ID));
             return;
         }
         Err(e) => {
+            append_log(format!("[withdraw-check] check_tx_confirmed error txid={} err={}", PREVIOUS_TX_ID, e));
             return;
         }
     }
@@ -267,9 +303,9 @@ async fn send_withdraw_request(withdraw_alkanes: HashMap<Principal, Vec<Withdraw
             acc
         });
     let required_alkane_ids: HashSet<String> = required_alkanes.keys().cloned().collect();
-    let alkanes_topup_address = get_address("alkanes_topup".to_string()).unwrap();
+    let alkanes_fund_address = get_address("alkanes_fund".to_string()).unwrap();
     let (selected_utxos, alkane_amounts): (Vec<_>, HashMap<String, u64>) = 
-    get_utxos_by_address(alkanes_topup_address.clone())
+    get_utxos_by_address(alkanes_fund_address.clone())
         .into_iter()
         .filter(|(_, alkaneid, _)| required_alkane_ids.contains(alkaneid))
         .fold(
@@ -323,7 +359,6 @@ async fn send_withdraw_request(withdraw_alkanes: HashMap<Principal, Vec<Withdraw
             let required_amount = required_alkanes.get(alkaneid).copied().unwrap_or(0);
             let change_amount = available_amount.saturating_sub(required_amount);
             
-            // 如果有剩余数量，创建找零 EdictInput
             if change_amount > 0 {
                 let (block_str, tx_str) = alkaneid.split_once(':')?;
                 let block = block_str.parse::<u64>().ok()?;
@@ -333,7 +368,7 @@ async fn send_withdraw_request(withdraw_alkanes: HashMap<Principal, Vec<Withdraw
                     block,
                     tx,
                     amount: change_amount as u128,
-                    output: 0,  // 找零 output 为 0
+                    output: 0,
                 })
             } else {
                 None
@@ -341,8 +376,7 @@ async fn send_withdraw_request(withdraw_alkanes: HashMap<Principal, Vec<Withdraw
         })
         .collect();
 
-    // 将找零数据添加到 edict_inputs
-    edict_inputs.extend(change_edicts);
+        edict_inputs.extend(change_edicts);
     
     let protostone_script = generate_protostone(edict_inputs);
 
@@ -374,29 +408,33 @@ async fn send_withdraw_request(withdraw_alkanes: HashMap<Principal, Vec<Withdraw
         amount: 330,
         op_return: None,
     });
-    let mut outputs: Vec<TransactionOutput> = withdraw_alkanes
-    .values()
-    .flatten()
-    .map(|request| {
-        TransactionOutput {
-            address: request.withdraw_address.clone(),
-            amount: 330,
-            op_return: None,
-        }
-    })
-    .collect();
+    let withdraw_outputs: Vec<TransactionOutput> = withdraw_alkanes
+        .values()
+        .flatten()
+        .map(|request| {
+            TransactionOutput {
+                address: request.withdraw_address.clone(),
+                amount: 330,
+                op_return: None,
+            }
+        })
+        .collect();
+    outputs.extend(withdraw_outputs);
+
     outputs.push(TransactionOutput {
         address: alkanes_fund_address.clone(),
         amount: 0,
         op_return: Some(protostone_script.as_bytes().to_vec()),
     });
 
-    // 估算需要的GAS，用get_feerate()获取当前GAS，用calculate_fee_simple计算fee
     let fee_rate = get_feerate().await.unwrap();
-    let fee = calculate_fee_simple(inputs.len(), outputs.len(), fee_rate.parse::<f64>().unwrap());
+
+    let total_input: u64 = inputs.iter().map(|input| input.amount).sum();
+    let total_output: u64 = outputs.iter().map(|output| output.amount).sum();
+    
+    let fee = calculate_fee_with_opreturn(inputs.len(), outputs.len() + 1 , protostone_script.as_bytes().len(), fee_rate.parse::<f64>().unwrap());
 
     let btc_utxos = get_btc_utxos(alkanes_btc_address.clone()).await.unwrap();
-    // 筛选出大于fee的utxo，如果不足选择多个utxo，直到满足fee，当不够就报错
 
     let btc_public_key = ic::schnorr_api::schnorr_public_key(
         SCHNORR_KEY_NAME.to_string(),
@@ -411,26 +449,28 @@ async fn send_withdraw_request(withdraw_alkanes: HashMap<Principal, Vec<Withdraw
             txid: utxo.txid.clone(),
             vout: utxo.vout,
             amount: utxo.value,
-            address: fomowell_btc_address.to_string(),
+            address: alkanes_btc_address.clone(),
             public_key: Some(btc_public_key_hex.clone()),
             signature_type: Some(InputSignatureType::from_str("taproot_default").unwrap()),
             witness: None,
         });
         total_value += utxo.value;
-        if total_value >= fee {
+        if total_value >= fee + total_input- total_output +1000 {
             break;
         }
     }
     inputs.extend(btc_inputs.clone());
-    if total_value - fee > 330 {
+    let new_fee = calculate_fee_with_opreturn(inputs.len(), outputs.len() + 1 , protostone_script.as_bytes().len(), fee_rate.parse::<f64>().unwrap());
+    let change = inputs.iter().map(|input| input.amount).sum::<u64>()
+    .saturating_sub(outputs.iter().map(|output| output.amount).sum::<u64>())
+    .saturating_sub(new_fee);
+    if  change > 330 {
         outputs.push(TransactionOutput {
             address: alkanes_btc_address.clone(),
-            amount: total_value - fee,
+            amount: change,
             op_return: None,
         });
     }
-    let final_hex: String;
-    // 签名
     match create_transaction_multi(
         "testnet",
         inputs,
@@ -441,16 +481,22 @@ async fn send_withdraw_request(withdraw_alkanes: HashMap<Principal, Vec<Withdraw
     .await
     {
         Ok(final_psbt) => {
-            final_hex = final_psbt.psbt_hex;
+            let final_hex = final_psbt.psbt_hex.clone();
             let transaction_bytes = hex::decode(&final_hex)
             .map_err(|e| format!("Failed to decode transaction hex: {}", e))?;
-        send_transaction(IC_BITCOIN_NETWORK, transaction_bytes).await;
-    }
+            send_transaction(IC_BITCOIN_NETWORK, transaction_bytes).await;
+            let txid = final_psbt.txid.clone();
+            PENDING_TX_ID.with(|id| {
+                *id.borrow_mut() = Some(txid.clone());
+            });
+            append_log(format!("[withdraw-send] broadcast txid={} ", txid));
+            Ok(txid)
+        }
         Err(err) => {
+            append_log(format!("[withdraw-send] create tx failed err={:?}", err));
             return Err(format!("cant create final tx !"));
         }
     }
-    Ok(final_hex)
 }
 
 async fn gather_alkanes_utxo() -> Result<String, String> {
@@ -524,12 +570,10 @@ async fn gather_alkanes_utxo() -> Result<String, String> {
             op_return: Some(protostone_script.as_bytes().to_vec()),
         });
 
-        // 估算需要的GAS，用get_feerate()获取当前GAS，用calculate_fee_simple计算fee
         let fee_rate = get_feerate().await.unwrap();
-        let fee = calculate_fee_simple(inputs.len(), outputs.len(), fee_rate.parse::<f64>().unwrap());
+        let fee = calculate_fee_with_opreturn(inputs.len(), outputs.len() +1, protostone_script.as_bytes().len(), fee_rate.parse::<f64>().unwrap());
 
         let btc_utxos = get_btc_utxos(alkanes_btc_address.clone()).await.unwrap();
-        // 筛选出大于fee的utxo，如果不足选择多个utxo，直到满足fee，当不够就报错
 
         let btc_public_key = ic::schnorr_api::schnorr_public_key(
             SCHNORR_KEY_NAME.to_string(),
@@ -555,10 +599,14 @@ async fn gather_alkanes_utxo() -> Result<String, String> {
             }
         }
         inputs.extend(btc_inputs.clone());
-        if total_value - fee > 330 {
+        let new_fee = calculate_fee_with_opreturn(inputs.len(), outputs.len() + 1 , protostone_script.as_bytes().len(), fee_rate.parse::<f64>().unwrap());
+        let change = inputs.iter().map(|input| input.amount).sum::<u64>()
+            .saturating_sub(outputs.iter().map(|output| output.amount).sum::<u64>())
+            .saturating_sub(new_fee);
+        if  change > 330 {
             outputs.push(TransactionOutput {
                 address: alkanes_btc_address.clone(),
-                amount: total_value - fee,
+                amount: change,
                 op_return: None,
             });
         }
@@ -573,23 +621,31 @@ async fn gather_alkanes_utxo() -> Result<String, String> {
         .await
         {
             Ok(final_psbt) => {
-                final_hex = final_psbt.psbt_hex;
+                final_hex = final_psbt.psbt_hex.clone();
                 let transaction_bytes = hex::decode(&final_hex)
                 .map_err(|e| format!("Failed to decode transaction hex: {}", e))?;
                 send_transaction(IC_BITCOIN_NETWORK, transaction_bytes).await;
+                let txid = final_psbt.txid.clone();
+                PENDING_TX_ID.with(|id| {
+                    *id.borrow_mut() = Some(txid.clone());
+                });
+                WITHDRAW_REQUESTS.with(|requests| {
+                    requests.borrow_mut().clear();
+                });
+                append_log(format!("[gather] broadcast txid={} ",txid));
+                Ok(txid)
             }
             Err(err) => {
+                append_log(format!("[gather] create tx failed err={:?}", err));
                 return Err(format!("cant create final tx !"));
             }
         }
-        Ok(final_hex)
-
 }
 
 
 async fn gather_alkanes_utxo_timer() {
     if let Err(e) = gather_alkanes_utxo().await {
-        ic_cdk::println!("gather_alkanes_utxo error: {}", e);
+        append_log(format!("gather_alkanes_utxo error={}", e));
     }
 }
 
@@ -623,11 +679,12 @@ async fn check_tx_confirmed(txid: String) -> Result<bool, String> {
                     )
                 })
                 .map(|confirmed| {
-                    // confirmed: true -> Ok(true), confirmed: false -> Ok(false)
+                    append_log(format!("[check-tx] txid={} confirmed={}", txid, confirmed));
                     confirmed
                 })
         }
         Err((code, msg)) => {
+            append_log(format!("[check-tx] http error txid={} code={:?} msg={}", txid, code, msg));
             Err(format!("HTTP request failed: {:?}, {}", code, msg))
         }
     }
@@ -640,7 +697,6 @@ pub struct UtxoInfo {
     vout: u32,
 }
 
-// 获取IC上的BTC余额
 #[update]
 async fn get_btc_utxos(address: String) -> Result<Vec<UtxoInfo>, String> {
     let network = IC_BITCOIN_NETWORK;
@@ -676,8 +732,6 @@ async fn get_btc_utxos(address: String) -> Result<Vec<UtxoInfo>, String> {
         }
     }
 }
-
-
 
 // Tools
 fn bitcoin_network_to_ic_bitcoin_network(
@@ -840,22 +894,53 @@ async fn add_white_token_ic(token: String) -> Result<String, String> {
                             }
                             
                             match add_white_token(token.clone()) {
-                                Ok(_) => Ok(format!("Token {} created successfully with meme_token_id {}", token, meme_token_id)),
-                                Err(e) => Err(format!("Token failed to add to whitelist: {}", e)),
+                                Ok(_) => {
+                                    append_log(format!("[token-create] success token={} meme_token_id={}", token, meme_token_id));
+                                    Ok(format!("Token {} created successfully with meme_token_id {}", token, meme_token_id))
+                                },
+                                Err(e) => {
+                                    append_log(format!("[token-create] add whitelist failed token={} err={}", token, e));
+                                    Err(format!("Token failed to add to whitelist: {}", e))
+                                },
                             }
                         }
                         crate::did::fomowell_token::Result3::Err(e) => {
+                            append_log(format!("[token-create] service returned error token={} err={}", token, e));
                             Err(format!("Failed to create token: {}", e))
                         }
                     }
                 }
-                Err(e) => Err(format!("Failed to call create_token: {:?}", e)),
+                Err(e) => {
+                    append_log(format!("[token-create] call create_token failed token={} err={:?}", token, e));
+                    Err(format!("Failed to call create_token: {:?}", e))
+                },
             }
         }
         Err((code, message)) => {
+            append_log(format!("[token-create] http error token={} code={:?} message={}", token, code, message));
             Err(format!("HTTP request failed: code={:?}, message={}", code, message))
         }
     }
+}
+
+#[query]
+fn get_logs(offset: u64, limit: u64) -> Vec<LogEntry> {
+    LOGS.with(|logs| {
+        let vec = logs.borrow();
+        let start = offset as usize;
+        let end = (offset + limit).min(vec.len() as u64) as usize;
+        if start >= vec.len() {
+            Vec::new()
+        } else {
+            vec[start..end].to_vec()
+        }
+    })
+}
+
+#[update]
+async fn clear_logs() -> Result<String, String> {
+    LOGS.with(|logs| logs.borrow_mut().clear());
+    Ok("logs cleared".into())
 }
 
 
