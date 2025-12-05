@@ -1,0 +1,17 @@
+{
+  "canisters": {
+    "fomowelll": {
+      "candid": "src/lib.rs",
+      "package": "fomowelll",
+      "type": "rust"
+    }
+  },
+  "defaults": {
+    "build": {
+      "args": "",
+      "packtool": ""
+    }
+  },
+  "output_env_file": ".env",
+  "version": 1
+}
