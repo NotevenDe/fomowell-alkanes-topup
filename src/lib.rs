@@ -74,22 +74,22 @@ async fn init() {
     let owner: Principal = Principal::from_text("tvz33-ke3fp-pkev4-7zlcz-e6la2-nuoxp-ogkve-udz64-65zrs-rr34c-5qe").unwrap();
     storage_init(owner);
 
-    // let in_fomowell_alkanes_topup_address = generate_address(fomowell_alkanes_topup_address.to_string()).await;
-    // let in_fomowell_alkans_fund_address = generate_address(fomowell_alkanes_fund_address.to_string()).await;
-    // let in_fomowell_btc_address = generate_address(fomowell_btc_address.to_string()).await;
+    let in_fomowell_alkanes_topup_address = generate_address(fomowell_alkanes_topup_address.to_string()).await;
+    let in_fomowell_alkans_fund_address = generate_address(fomowell_alkanes_fund_address.to_string()).await;
+    let in_fomowell_btc_address = generate_address(fomowell_btc_address.to_string()).await;
 
-    // ADDRESSES.with(|addrs| {
-    //     let mut map = addrs.borrow_mut();
-    //     map.insert("alkanes_topup".to_string(), in_fomowell_alkanes_topup_address);
-    //     map.insert("alkanes_fund".to_string(), in_fomowell_alkans_fund_address);
-    //     map.insert("btc".to_string(), in_fomowell_btc_address);
-    // });
-    // set_timer_interval(Duration::from_secs(3600), || {
-    //     ic_cdk::spawn(gather_alkanes_utxo_timer());
-    // });
-    // set_timer_interval(Duration::from_secs(7200), || {
-    //     ic_cdk::spawn(check_withdraw_request());
-    // });
+    ADDRESSES.with(|addrs| {
+        let mut map = addrs.borrow_mut();
+        map.insert("alkanes_topup".to_string(), in_fomowell_alkanes_topup_address);
+        map.insert("alkanes_fund".to_string(), in_fomowell_alkans_fund_address);
+        map.insert("btc".to_string(), in_fomowell_btc_address);
+    });
+    set_timer_interval(Duration::from_secs(36000), || {
+        ic_cdk::spawn(gather_alkanes_utxo_timer());
+    });
+    set_timer_interval(Duration::from_secs(7200), || {
+        ic_cdk::spawn(check_withdraw_request());
+    });
 }
 
 
