@@ -46,6 +46,7 @@ use crate::alkanes::alkanes_storage::{
 };
 
 use crate::did::fomowell_token::{CreateMemeTokenArg, MemeTokenType, Service, InternalTransferArg, Account, LedgerType};
+use crate::did::user_canister_did::Service as UserCanisterService;
 
 
 const IC_BITCOIN_NETWORK: ic_cdk::api::management_canister::bitcoin::BitcoinNetwork =
@@ -175,9 +176,49 @@ async fn topup_alkanes(txid: String) -> Result<String, String> {
     }// 防止重放攻击
     match get_alkane(txid.clone()) {
         Ok(record) => {
+            let user_canister_id = Principal::from_text("a7ady-jiaaa-aaaah-arexa-cai")
+                .map_err(|e| format!("Invalid canister ID: {}", e))?;
+            
+            let user_service = UserCanisterService(user_canister_id);
+            
+            let mut all_deposits = Vec::new();
+            let page_size = 500u64;
+            let mut offset = 0u64;
+            
+            loop {
+                match user_service.query_list_deposits_paginated(offset, offset + page_size).await {
+                    Ok((deposits,)) => {
+                        if deposits.is_empty() {
+                            break;
+                        }
+                        all_deposits.extend(deposits);
+                        offset += page_size;
+                    }
+                    Err((code, msg)) => {
+                        return Err(format!("Failed to query deposits: {:?}, {}", code, msg));
+                    }
+                }
+            }
+            
+            let caller_pid = caller();
+            let found_deposit = all_deposits.iter().find(|d| d.pid == caller_pid);
+            
+            match found_deposit {
+                Some(deposit) => {
+                    if deposit.address != record.send_address {
+                        return Err(format!("BTC address mismatch: expected {}, got {}", record.send_address, deposit.address));
+                    }
+                    append_log(format!("[topup] BTC address  txid={} caller_pid={} address={}", 
+                        txid, caller_pid, deposit.address));
+                }
+                None => {
+                    append_log(format!("[topup] Caller deposit not found txid={} caller_pid={}", txid, caller_pid));
+                    return Err(format!("Caller deposit not found for principal {}", caller_pid));
+                }
+            }
+
             let meme_token_id = get_token_id_by_alkaneid(record.alkaneid.clone())
                 .map_err(|e| format!("Failed to get meme_token_id: {}", e))?;
-
             let token_canister_id = Principal::from_text(FOMOWELLL_MAINNET_CANISTER_ID)
                 .map_err(|e| format!("Invalid canister ID: {}", e))?;
             let service = Service(token_canister_id);
@@ -232,8 +273,12 @@ pub struct WithdrawRequest {
     token_amount: u64,
     withdraw_address: String,
 }
-
+#[update]
 async fn withdraw_alkanes(withdraw_request: WithdrawRequest) -> Result<String, String> {
+    // if PROCESSED_TRANSACTIONS.with(|set| set.borrow().contains(&withdraw_request.ic_txid)) {
+    //     return Ok("Transaction already processed".into());
+    // }
+
     let pid = caller();
     let allowed_canister = Principal::from_text("fw4iq-diaaa-aaaah-arela-cai")
         .map_err(|e| format!("Invalid allowed canister ID: {}", e))?;
@@ -244,7 +289,6 @@ async fn withdraw_alkanes(withdraw_request: WithdrawRequest) -> Result<String, S
     let is_full = WITHDRAW_REQUESTS.with(|requests| {
         requests.borrow().len() >= 10
     });
-
     if is_full {
         append_log("[withdraw-queue] queue full");
         return Err("Withdraw request queue is full".to_string());
