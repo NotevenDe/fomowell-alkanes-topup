@@ -336,9 +336,10 @@ async fn check_withdraw_request()  {
 
 
 async fn send_withdraw_request(withdraw_alkanes: HashMap<Principal, Vec<WithdrawRequest>>) -> Result<String, String> {
-    let alkanes_topup_address = get_address("alkanes_topup".to_string()).unwrap();
-    let alkanes_fund_address = get_address("alkanes_fund".to_string()).unwrap();
-    let alkanes_btc_address = get_address("btc".to_string()).unwrap();
+    let keys = ["alkanes_topup", "alkanes_fund", "btc"];
+    let [alkanes_topup_address, alkanes_fund_address, alkanes_btc_address] =
+        keys.map(|k| get_address(k.to_string()).unwrap());
+    
     let required_alkanes: HashMap<String, u64> = withdraw_alkanes
         .values()
         .flatten()
@@ -544,10 +545,10 @@ async fn send_withdraw_request(withdraw_alkanes: HashMap<Principal, Vec<Withdraw
 }
 
 async fn gather_alkanes_utxo() -> Result<String, String> {
-        let alkanes_topup_address = get_address("alkanes_topup".to_string()).unwrap();
-        let alkanes_fund_address = get_address("alkanes_fund".to_string()).unwrap();
-        let alkanes_btc_address = get_address("btc".to_string()).unwrap();
-
+        let keys = ["alkanes_topup", "alkanes_fund", "btc"];
+        let [alkanes_topup_address, alkanes_fund_address, alkanes_btc_address] =
+            keys.map(|k| get_address(k.to_string()).unwrap());
+    
         let alkanes_topup_utxo = get_utxos_by_address(alkanes_topup_address.clone());
         let mut alkane_amounts: HashMap<String, u64> = HashMap::new();
 
