@@ -42,7 +42,8 @@ use crate::alkanes::alkanes_storage::{
     add_white_token, batch_upload, clear, get_all, get_white_tokens,
     init as storage_init, is_white_token, post_upgrade as storage_post_upgrade,
     pre_upgrade as storage_pre_upgrade, remove_white_token, alkanes_query, set_owner, AlkaneRecord,
-    set_token_id_mapping, get_token_id_by_alkaneid, get_alkane_fund_utxo, get_all_utxos, AlkaneUtxoRecord,get_utxos_by_address
+    set_token_id_mapping, get_token_id_by_alkaneid, get_alkane_fund_utxo, get_all_utxos, 
+    AlkaneUtxoRecord, get_utxos_by_address, set_utxo, remove_utxo, get_utxos_by_alkaneid, utxo_count
 };
 
 use crate::did::fomowell_token::{CreateMemeTokenArg, MemeTokenType, Service, InternalTransferArg, Account, LedgerType};
@@ -349,35 +350,69 @@ async fn send_withdraw_request(withdraw_alkanes: HashMap<Principal, Vec<Withdraw
         });
     let required_alkane_ids: HashSet<String> = required_alkanes.keys().cloned().collect();
     let alkanes_fund_address = get_address("alkanes_fund".to_string()).unwrap();
-    let (selected_utxos, alkane_amounts): (Vec<_>, HashMap<String, u64>) = 
-    get_utxos_by_address(alkanes_fund_address.clone())
-        .into_iter()
-        .filter(|(_, alkaneid, _)| required_alkane_ids.contains(alkaneid))
-        .fold(
-            (Vec::new(), HashMap::new()),
-            |(mut utxos, mut amounts), (addr, alkaneid, record)| {
-                utxos.push((addr, alkaneid.clone(), record.clone()));
-                *amounts.entry(alkaneid).or_insert(0) += record.amount;
-                (utxos, amounts)
-            }
-        );
+    
+    let all_utxos: Vec<(String, String, AlkaneUtxoRecord)> = 
+        get_utxos_by_address(alkanes_fund_address.clone())
+            .into_iter()
+            .filter(|(_, alkaneid, _)| required_alkane_ids.contains(alkaneid))
+            .collect();
+
+    // 检查总余额是否足够
+    let total_alkane_amounts: HashMap<String, u64> = all_utxos
+        .iter()
+        .fold(HashMap::new(), |mut acc, (_, alkaneid, record)| {
+            *acc.entry(alkaneid.clone()).or_insert(0) += record.amount;
+            acc
+        });
+    
     if let Some((alkaneid, required_amount)) = required_alkanes
         .iter()
         .find(|(alkaneid, required)| { 
-            alkane_amounts.get(*alkaneid).copied().unwrap_or(0) < **required
+            total_alkane_amounts.get(*alkaneid).copied().unwrap_or(0) < **required
         })
     {
-        let available = alkane_amounts.get(alkaneid).copied().unwrap_or(0);
+        let available = total_alkane_amounts.get(alkaneid).copied().unwrap_or(0);
         return Err(format!(
             "Insufficient alkanes for {}: required {}, available {}",
             alkaneid, required_amount, available
         ));
     }
 
-    let fund_summary: Vec<(String, u64)> = alkane_amounts
-    .iter()
-    .map(|(alkaneid, amount)| (alkaneid.clone(), *amount))
-    .collect();
+    let mut selected_utxos: Vec<(String, String, AlkaneUtxoRecord)> = Vec::new();
+    let mut selected_alkane_amounts: HashMap<String, u64> = HashMap::new();
+    
+    for (alkaneid, required_amount) in &required_alkanes {
+        let mut alkane_utxos: Vec<(String, String, AlkaneUtxoRecord)> = all_utxos
+            .iter()
+            .filter(|(_, aid, _)| aid == alkaneid)
+            .map(|(a, aid, r)| (a.clone(), aid.clone(), r.clone()))
+            .collect();
+        alkane_utxos.sort_by(|(_, _, r1), (_, _, r2)| r2.amount.cmp(&r1.amount));
+        
+        let mut selected_amount = 0u64;
+        for utxo in alkane_utxos {
+            if selected_amount >= *required_amount {
+                break;
+            }
+            selected_utxos.push(utxo.clone());
+            selected_amount += utxo.2.amount;
+        }
+        
+        selected_alkane_amounts.insert(alkaneid.clone(), selected_amount);
+        
+        if selected_amount < *required_amount {
+            return Err(format!(
+                "Failed to select sufficient UTXOs for {}: required {}, selected {}",
+                alkaneid, required_amount, selected_amount
+            ));
+        }
+    }
+
+    // 使用选中的UTXO金额计算找零
+    let fund_summary: Vec<(String, u64)> = selected_alkane_amounts
+        .iter()
+        .map(|(alkaneid, amount)| (alkaneid.clone(), *amount))
+        .collect();
 
     let mut edict_inputs: Vec<EdictInput> = withdraw_alkanes
         .values()
@@ -397,12 +432,12 @@ async fn send_withdraw_request(withdraw_alkanes: HashMap<Principal, Vec<Withdraw
         })
         .collect();
 
-    // 构建找零数据：计算每个 alkaneid 的剩余数量，output 为 0
-    let change_edicts: Vec<EdictInput> = alkane_amounts
+    // 构建找零数据：使用选中的UTXO金额计算找零
+    let change_edicts: Vec<EdictInput> = selected_alkane_amounts
         .iter()
-        .filter_map(|(alkaneid, &available_amount)| {
+        .filter_map(|(alkaneid, &selected_amount)| {
             let required_amount = required_alkanes.get(alkaneid).copied().unwrap_or(0);
-            let change_amount = available_amount.saturating_sub(required_amount);
+            let change_amount = selected_amount.saturating_sub(required_amount);
             
             if change_amount > 0 {
                 let (block_str, tx_str) = alkaneid.split_once(':')?;
@@ -421,7 +456,7 @@ async fn send_withdraw_request(withdraw_alkanes: HashMap<Principal, Vec<Withdraw
         })
         .collect();
 
-        edict_inputs.extend(change_edicts);
+    edict_inputs.extend(change_edicts);
     
     let protostone_script = generate_protostone(edict_inputs);
 
@@ -444,7 +479,6 @@ async fn send_withdraw_request(withdraw_alkanes: HashMap<Principal, Vec<Withdraw
             witness: None,
         });
     }
-    
     
     
     let mut outputs: Vec<TransactionOutput> = Vec::new();
@@ -500,7 +534,7 @@ async fn send_withdraw_request(withdraw_alkanes: HashMap<Principal, Vec<Withdraw
             witness: None,
         });
         total_value += utxo.value;
-        if total_value >= fee + total_input- total_output +1000 {
+        if total_value  + total_input >= fee + total_output + 2000 {
             break;
         }
     }
@@ -986,6 +1020,54 @@ fn get_logs(offset: u64, limit: u64) -> Vec<LogEntry> {
 async fn clear_logs() -> Result<String, String> {
     LOGS.with(|logs| logs.borrow_mut().clear());
     Ok("logs cleared".into())
+}
+
+
+#[update]
+async fn batch_upload_utxos(utxos: Vec<(String, String, AlkaneUtxoRecord)>) -> Result<String, String> {
+    let mut uploaded = 0;
+    let mut errors = Vec::new();
+    
+    for (address, alkaneid, utxo) in utxos {
+        match set_utxo(address.clone(), alkaneid.clone(), utxo) {
+            Ok(_) => uploaded += 1,
+            Err(e) => errors.push(format!("Failed to upload UTXO for address: {}, alkaneid: {}, error: {}", address, alkaneid, e)),
+        }
+    }
+    
+    if errors.is_empty() {
+        Ok(format!("Batch upload successful: {} UTXOs saved", uploaded))
+    } else {
+        Err(format!("Batch upload completed with errors. Success: {}, Errors: {}", uploaded, errors.join("; ")))
+    }
+}
+#[query]
+fn get_utxos_by_address_and_alkaneid(address: String, alkaneid: String) -> Vec<AlkaneUtxoRecord> {
+    get_alkane_fund_utxo(address, alkaneid)
+}
+
+#[query]
+fn get_all_utxos_ic() -> Vec<(String, String, AlkaneUtxoRecord)> {
+    get_all_utxos()
+}
+#[update]
+async fn batch_remove_utxos(utxos: Vec<(String, String, String, u64)>) -> Result<String, String> {
+    let mut removed = 0;
+    let mut errors = Vec::new();
+    
+    for (address, alkaneid, txid, vout) in utxos {
+        match remove_utxo(address.clone(), alkaneid.clone(), txid.clone(), vout) {
+            Ok(_) => removed += 1,
+            Err(e) => errors.push(format!("Failed to remove UTXO for address: {}, alkaneid: {}, txid: {}, vout: {}, error: {}", 
+                address, alkaneid, txid, vout, e)),
+        }
+    }
+    
+    if errors.is_empty() {
+        Ok(format!("Batch remove successful: {} UTXOs removed", removed))
+    } else {
+        Err(format!("Batch remove completed with errors. Success: {}, Errors: {}", removed, errors.join("; ")))
+    }
 }
 
 
