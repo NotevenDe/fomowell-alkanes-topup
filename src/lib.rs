@@ -265,6 +265,70 @@ async fn topup_alkanes(txid: String) -> Result<String, String> {
 }
 
 
+pub fn deploy_alkanes_protostone(
+    premint: u128,
+    amount_per_mint: u128,
+    cap: u128,
+    token_name: &str,
+    token_symbol: &str,
+) -> ScriptBuf {
+    fn name_to_reversed_hex(s: &str) -> u128 {
+        let reversed: String = s.chars().rev().collect();
+        let hex_str = hex::encode(reversed.as_bytes());
+        u128::from_str_radix(&hex_str, 16).unwrap_or(0) //反转后加上基数0x
+    }
+
+    let calldata = vec![
+        4,
+        797,
+        0,
+        premint,
+        amount_per_mint,
+        cap,
+        name_to_reversed_hex(token_name),
+        name_to_reversed_hex(token_symbol),
+    ];
+    fn push_leb128_u128(mut value: u128, out: &mut Vec<u8>) {
+        loop {
+            let mut byte = (value & 0x7f) as u8;
+            value >>= 7;
+            if value != 0 {
+                byte |= 0x80;
+                out.push(byte);
+            } else {
+                out.push(byte);
+                break;
+            }
+        }
+    }
+
+    let mut message_bytes = Vec::new();
+    for value in calldata {
+        push_leb128_u128(value, &mut message_bytes);
+    }
+
+    let proto = Protostone {
+        subprotocol_id: 1,
+        edicts: vec![],
+        pointer: Some(0),
+        refund_pointer: Some(0),
+        burn: None,
+        message: Some(message_bytes),
+        from: None,
+    };
+
+    build_alkanes_transfer_script(&proto)
+}
+
+#[test]
+fn test_deploy_alkanes_protostone() {
+    let script = deploy_alkanes_protostone(10000, 10000, 10000, "test", "test");
+    let op_return_bytes = script.as_bytes().to_vec();
+    let op_return_hex = hex::encode(&op_return_bytes);
+
+    println!("op_return: {}", op_return_hex);
+}
+
 
 #[derive(CandidType, Deserialize, Clone)]
 pub struct WithdrawRequest {
